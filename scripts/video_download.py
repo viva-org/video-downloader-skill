@@ -12,28 +12,27 @@ import json
 import os
 import re
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qs
 
 # Set UTF-8 encoding for Windows console
 if sys.platform == "win32":
-    try:
-        # Try to set UTF-8 encoding for Windows console
-        import codecs
-        sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
-        sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
-    except Exception:
-        # If that fails, we'll use safe_print function
-        pass
+    # Ensure stdout/stderr use UTF-8 where possible without detaching
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
 
 
 def safe_print(text):
-    """Print text safely, handling encoding errors on Windows."""
+    """Print text safely, handling encoding errors."""
     try:
         print(text)
     except UnicodeEncodeError:
-        # Remove or replace problematic characters
-        safe_text = text.encode('ascii', 'ignore').decode('ascii')
-        print(safe_text)
+        try:
+            print(text.encode('utf-8', errors='ignore').decode('utf-8'))
+        except Exception:
+            safe_text = text.encode('ascii', 'ignore').decode('ascii')
+            print(safe_text)
 
 
 def is_bilibili_url(url):
@@ -73,26 +72,6 @@ def format_bilibili_url(url):
         return url
 
 
-def detect_browser():
-    """Detect available browsers for cookie extraction."""
-    browsers = ['chrome', 'edge', 'firefox', 'brave', 'opera', 'safari']
-    
-    for browser in browsers:
-        try:
-            # Try to extract cookies to test if browser is available
-            result = subprocess.run(
-                ["yt-dlp", "--cookies-from-browser", browser, "--print", "cookies", "https://www.bilibili.com"],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                return browser
-        except Exception:
-            continue
-    
-    return None
-
-
 def check_yt_dlp():
     """Check if yt-dlp is installed, install if not."""
     # Add user's local bin to PATH
@@ -125,19 +104,22 @@ def check_yt_dlp():
 def get_video_info(url):
     """Get information about the video without downloading."""
     try:
+        # Use a simpler call for info extraction
         result = subprocess.run(
             ["yt-dlp", "--dump-json", "--no-playlist", url],
             capture_output=True,
             text=True,
-            check=True,
-            encoding='utf-8'
+            encoding='utf-8',
+            errors='replace'
         )
-        return json.loads(result.stdout)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        return None
     except Exception:
         return None
 
 
-def download_video_internal(url, output_path, quality, format_type, audio_only, cookies_file, is_retry=False):
+def download_video_internal(url, output_path, quality, format_type, audio_only, is_retry=False):
     """
     Internal function to download video with specific URL.
     Returns (success, error_message)
@@ -147,11 +129,6 @@ def download_video_internal(url, output_path, quality, format_type, audio_only, 
     
     # Build command
     cmd = ["yt-dlp"]
-
-    # Add cookies file if provided
-    if cookies_file and os.path.exists(cookies_file):
-        safe_print(f"Using provided cookies file: {cookies_file}")
-        cmd.extend(["--cookies", cookies_file])
     
     # --- Bilibili-specific optimizations ---
     if is_bilibili:
@@ -228,30 +205,52 @@ def download_video_internal(url, output_path, quality, format_type, audio_only, 
         
         safe_print("Starting download...")
     
-    # Download the video
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
-    
-    return (result.returncode == 0, result.stderr if result.returncode != 0 else None)
+    # Download the video - do NOT capture output to avoid buffer/encoding issues during progress updates
+    try:
+        # We don't use capture_output=True here so the user can see progress
+        subprocess.run(cmd, check=True)
+        return (True, None)
+    except subprocess.CalledProcessError as e:
+        return (False, f"yt-dlp failed with exit code {e.returncode}")
+    except Exception as e:
+        return (False, str(e))
 
 
-def download_video(url, output_path=None, quality="best", format_type="mp4", audio_only=False, cookies_file=None):
+def download_video(url, output_path=None, quality="best", format_type="mp4", audio_only=False):
     """
     Download a video from YouTube, Bilibili or other platforms.
-    Includes automatic retry with cleaned URL for Bilibili 412 errors.
     
     Args:
         url: Video URL
-        output_path: Directory to save the video (default: current directory)
+        output_path: Directory to save the video (default: smart detection)
         quality: Quality setting (best, 1080p, 720p, 480p, 360p, worst)
         format_type: Output format (mp4, webm, mkv, etc.)
         audio_only: Download only audio (mp3)
-        cookies_file: Path to cookies file (Netscape format)
     """
     check_yt_dlp()
     
-    # Use current directory if no output path specified
+    # Smart default output path detection
     if output_path is None:
-        output_path = os.getcwd()
+        cwd = Path.cwd()
+        
+        # Try to detect if we are inside a .claude directory structure
+        claude_base = None
+        for parent in [cwd] + list(cwd.parents):
+            if parent.name == ".claude":
+                claude_base = parent.parent
+                break
+        
+        if claude_base:
+            # If we found a .claude directory, we use its parent as the base
+            # Prefer 'Downloads' folder if it exists in the base directory
+            downloads_dir = claude_base
+            if downloads_dir.exists() and downloads_dir.is_dir():
+                output_path = str(downloads_dir)
+            else:
+                output_path = str(claude_base)
+        else:
+            # If no .claude found, use the current working directory
+            output_path = str(cwd)
     
     # Ensure output directory exists and use absolute path
     output_path = os.path.abspath(output_path)
@@ -265,7 +264,7 @@ def download_video(url, output_path=None, quality="best", format_type="mp4", aud
     try:
         # Attempt download
         success, error_msg = download_video_internal(
-            url, output_path, quality, format_type, audio_only, cookies_file, is_retry=False
+            url, output_path, quality, format_type, audio_only, is_retry=False
         )
         
         if success:
@@ -281,15 +280,9 @@ def download_video(url, output_path=None, quality="best", format_type="mp4", aud
         # Provide helpful hints for common errors
         if is_bilibili and error_msg:
             if "412" in error_msg:
-                safe_print("\n[HINT] Bilibili 412 error persists. Try:")
-                safe_print("  1. Open Bilibili in your browser and login")
-                safe_print("  2. Export cookies and use -c option")
-                safe_print("  3. Wait a few minutes and try again")
+                safe_print("\n[HINT] Bilibili 412 error. Try waiting a few minutes or using a different IP.")
             elif "403" in error_msg or "forbidden" in error_msg.lower():
-                safe_print("\n[HINT] Access forbidden. This might be due to:")
-                safe_print("  1. Geographic restrictions")
-                safe_print("  2. Login required for this video")
-                safe_print("  3. IP being rate-limited")
+                safe_print("\n[HINT] Access forbidden. The video might be restricted or login required.")
         
         return False
             
@@ -325,10 +318,6 @@ def main():
         action="store_true",
         help="Download only audio as MP3"
     )
-    parser.add_argument(
-        "-c", "--cookies",
-        help="Path to cookies file (Netscape format) for passing authentication"
-    )
     
     args = parser.parse_args()
     
@@ -337,8 +326,7 @@ def main():
         output_path=args.output,
         quality=args.quality,
         format_type=args.format,
-        audio_only=args.audio_only,
-        cookies_file=args.cookies
+        audio_only=args.audio_only
     )
     
     sys.exit(0 if success else 1)

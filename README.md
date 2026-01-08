@@ -1,6 +1,6 @@
 # Video Downloader Skill
 
-`video-downloader-skill` is a powerful command-line tool for downloading videos and audio from hundreds of websites, including YouTube, Bilibili, and Twitter. It is built on top of the popular `yt-dlp` library and provides a streamlined interface for common downloading tasks.
+`video-downloader-skill` is a powerful command-line tool for downloading videos and audio from numerous websites, including YouTube, Bilibili, and Twitter. It is built on top of the popular `yt-dlp` library and provides a streamlined interface for common downloading tasks.
 
 This skill is designed to be used as a Claude Code Skill, allowing for easy integration into automated workflows.
 
